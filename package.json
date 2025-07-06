@@ -1,0 +1,23 @@
+{
+  "name": "proto-decode",
+  "version": "0.0.1",
+  "description": "Simple message decoder tool for protocol buffer APIs",
+  "author": "Kyle Carbone",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kccarbone/proto-decode.git"
+  },
+  "type": "module",
+  "main": "index.js",
+  "bin": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "clean": "rm -rf node_modules/",
+    "publish": "npm publish --access public"
+  },
+  "dependencies": {
+    "chalk": "^5.4.1",
+    "protobufjs": "^7.5.3"
+  }
+}

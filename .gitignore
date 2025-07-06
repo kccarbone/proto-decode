@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Cache
+.cache
+.npm
+.eslintcache
+*.tsbuildinfo
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+
+# Build outputs
+build/
+out/
+*.tgz
+
+# Misc
+.DS_Store
