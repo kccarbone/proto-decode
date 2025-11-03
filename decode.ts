@@ -26,25 +26,38 @@ type LogMsg = {
   depth: number;
   nodeId: number;
   dataType?: string;
-  size?: number;
-  raw?: (number | ArrayLike<number>);
+  subLen?: number;
+  header?: ArrayLike<number>;
+  meta?: ArrayLike<number>;
+  content?: ArrayLike<number>;
   parsed?: string;
   color?: ((x: string) => string);
 };
 
-// Helpers
+/** Output formatting */
 function logNode(msg: LogMsg) {
-  const format = msg.color ?? ((x: string) => x);
+  const color = msg.color ?? ((x: string) => x);
   const idLabel = msg.nodeId.toString().padStart(3, ' ');
-  const indent = [...new Array(msg.depth).keys()].reduce((a, c, i) => `${a}---`, '');
-  const chunk = ((msg.raw === undefined) ? [] : (typeof msg.raw === 'number' ? [msg.raw] : msg.raw));
-  const len = (chunk.length || msg.size || 0);
+  const indent = [...new Array(msg.depth).keys()].reduce((a, c, i) => `${a}|  `, '');
 
-  // Append to hex output
-  sb.hexOutput += str.hex(msg.raw, format);
+  // Hex output
+  sb.hexOutput += str.hex(msg.header, chalk.cyan);
+  sb.hexOutput += str.hex(msg.meta, chalk.blue);
+  sb.hexOutput += str.hex(msg.content, color);
 
-  // Append to tree output
-  sb.treeOutput += (chalk.black.bgGray(indent) + chalk.bold.black.bgCyan(`${idLabel}`) + chalk.blue(` ${msg.dataType}(${len}) `) + format(msg.parsed || '') + '\n');
+  // Verbose output
+  if (verboseMode) {
+    sb.treeOutput += chalk.gray(indent);
+    sb.treeOutput += (msg.header && chalk.cyanBright(`+${msg.header.length}  `)) || '';
+    sb.treeOutput += (msg.meta && chalk.blueBright(`+${msg.meta.length}  `)) || '';
+    sb.treeOutput += (msg.content && color(`+${msg.content.length}  `)) || '';
+    sb.treeOutput += (msg.subLen && chalk.magenta(`+${msg.subLen}  `)) || '';
+    sb.treeOutput += chalk.gray(`= ${(msg.header?.length ?? 0) + (msg.meta?.length ?? 0) + (msg.content?.length ?? 0) + (msg.subLen ?? 0)}`)
+    sb.treeOutput += '\n';
+  }
+
+  // Tree output
+  sb.treeOutput += (chalk.gray(indent) + chalk.bold.black.bgCyan(`${idLabel}`) + chalk.blue(` ${msg.dataType}(${msg.content?.length ?? msg.subLen ?? 0}) `) + color(msg.parsed || '') + '\n');
 }
 
 /** Full protobuf decode */
@@ -92,19 +105,8 @@ function parseNode(input: Uint8Array<ArrayBuffer>, depth = 0) {
     const body = branch.slice(header.chunk.length);
     const nodeId = header.value >>> 3;
     const nodeType = header.value & 0x07;
-    const info: LogMsg = { depth, nodeId };
+    const info: LogMsg = { depth, nodeId, header: header.chunk };
     let subNode: Uint8Array<ArrayBuffer> | undefined;
-    let offset = 0;
-
-    // Log header
-    sb.hexOutput += str.hex(header.chunk, chalk.cyan);
-
-    // Extra logging
-    if (verboseMode) {
-      sb.treeOutput += chalk.black([...new Array(depth).keys()].reduce((a, c, i) => `${a}---`, ''));
-      sb.treeOutput += chalk.cyanBright(` ${header.chunk.length}b`);
-      sb.treeOutput += chalk.blueBright(` ${(body.length)} bytes\n`);
-    }
 
     // Parse content based on type
     if (nodeType === 0) {
@@ -115,8 +117,7 @@ function parseNode(input: Uint8Array<ArrayBuffer>, depth = 0) {
 
       // Content immediately follows header
       const content = num.varInt(body);
-      info.raw = content.chunk;
-      info.size = content.chunk.length;
+      info.content = content.chunk;
       info.parsed = content.value.toString();
     }
     else if (nodeType === 1) {
@@ -127,8 +128,7 @@ function parseNode(input: Uint8Array<ArrayBuffer>, depth = 0) {
 
       // Content is next 8 bytes
       const content = num.fixedInt(body, 8);
-      info.raw = content.chunk;
-      info.size = content.chunk.length;
+      info.content = content.chunk;
       info.parsed = content.value.toString();
     }
     else if (nodeType === 2) {
@@ -138,26 +138,25 @@ function parseNode(input: Uint8Array<ArrayBuffer>, depth = 0) {
 
       // First block indicates content length
       const meta = num.varInt(body);
-      info.size = meta.value;
-      sb.hexOutput += str.hex(meta.chunk, chalk.blue);
-      offset = meta.chunk.length;
+      info.meta = meta.chunk;
+      const offset = meta.chunk.length;
 
       // Content follows meta-block
-      const content = body.slice(offset, offset + info.size);
+      const content = body.slice(offset, offset + meta.value);
 
       if (bin.likelyString(content)) {
         // Scenario 1: String
         // Parse as ASCII character string
         info.dataType = 'string';
         info.color = chalk.yellow;
-        info.raw = content;
+        info.content = content;
         info.parsed = str.parseString(content);
       }
       else {
         // Scenario 2: Sub-node
         // Store content to be parsed at the bottom of this function
         info.dataType = 'sub';
-        //info.size = content.length;
+        info.subLen = meta.value;
         subNode = content;
       }
     }
@@ -169,8 +168,7 @@ function parseNode(input: Uint8Array<ArrayBuffer>, depth = 0) {
 
       // This type was never really used outside of a few early implementations
       // We'll note it in case it ever comes up
-      info.raw = body.slice();
-      info.size = body.length;
+      info.content = body.slice();
       info.parsed = 'Unsupported type';
     }
     else if (nodeType === 4) {
@@ -181,8 +179,7 @@ function parseNode(input: Uint8Array<ArrayBuffer>, depth = 0) {
 
       // This type was never really used outside of a few early implementations
       // We'll note it in case it ever comes up
-      info.raw = body.slice();
-      info.size = body.length;
+      info.content = body.slice();
       info.parsed = 'Unsupported type';
     }
     else if (nodeType === 5) {
@@ -193,16 +190,14 @@ function parseNode(input: Uint8Array<ArrayBuffer>, depth = 0) {
 
       // Content is next 4 bytes
       const content = num.fixedInt(body, 4);
-      info.raw = content.chunk;
-      info.size = content.chunk.length;
+      info.content = content.chunk;
       info.parsed = content.value.toString();
     }
     else {
       // Type not recognized!
       info.dataType = 'unknown';
       info.color = chalk.whiteBright.bgRed;
-      info.raw = body.slice();
-      info.size = body.length;
+      info.content = body.slice();
       info.parsed = `Invalid data type (${nodeType})`;
     }
 
@@ -215,7 +210,7 @@ function parseNode(input: Uint8Array<ArrayBuffer>, depth = 0) {
     }
 
     // Remove the bytes from this branch and leave the rest for the next loop
-    branch = body.slice(offset + (info.size ?? 0));
+    branch = body.slice((info.meta?.length ?? 0) + (info.content?.length ?? 0) + (info.subLen ?? 0));
     loops++;
   }
 
