@@ -9,13 +9,14 @@ import num from './helpers/number.ts';
 const verboseMode = argv.some(x => str.contains(x, '--verbose'));
 const useSnappy = argv.some(x => str.contains(x, '--snappy'));
 const useSLIP = argv.some(x => str.contains(x, '--slip'));
-const lastParam = argv[argv.length - 1];
+const modelFile = argv.find(x => str.contains(x, '.json'));
 
 // Working model
 let model = {};
+let curIndex = 0;
 
-if (str.contains(lastParam, '.json')) {
-  const modelText = await readFile(new URL(lastParam, import.meta.url), 'utf8');
+if (modelFile) {
+  const modelText = await readFile(new URL(modelFile, import.meta.url), 'utf8');
   model = JSON.parse(modelText);
 }
 
@@ -26,38 +27,40 @@ type LogMsg = {
   depth: number;
   nodeId: number;
   dataType?: string;
-  subLen?: number;
   header?: ArrayLike<number>;
   meta?: ArrayLike<number>;
   content?: ArrayLike<number>;
   parsed?: string;
   color?: ((x: string) => string);
+  bgColor?: ((x: string) => string);
 };
 
 /** Output formatting */
 function logNode(msg: LogMsg) {
   const color = msg.color ?? ((x: string) => x);
-  const idLabel = msg.nodeId.toString().padStart(3, ' ');
+  const bgColor = msg.bgColor ?? ((x: string) => x);
   const indent = [...new Array(msg.depth).keys()].reduce((a, c, i) => `${a}|  `, '');
+  const valueBytes = (msg.dataType !== 'sub') ? msg.content : undefined;
+
+  curIndex += (msg.header?.length ?? 0) + (msg.meta?.length ?? 0) + (valueBytes?.length ?? 0);
 
   // Hex output
   sb.hexOutput += str.hex(msg.header, chalk.cyan);
   sb.hexOutput += str.hex(msg.meta, chalk.blue);
-  sb.hexOutput += str.hex(msg.content, color);
+  sb.hexOutput += str.hex(valueBytes, color);
+
+  // Tree output
+  sb.treeOutput += (chalk.gray(indent) + chalk.bold.cyan(`|${msg.nodeId}:`) + chalk.blue(` ${msg.dataType}(${msg.content?.length ?? 0}) `) + color(msg.parsed || '') + '\n');
 
   // Verbose output
   if (verboseMode) {
     sb.treeOutput += chalk.gray(indent);
-    sb.treeOutput += (msg.header && chalk.cyanBright(`+${msg.header.length}  `)) || '';
-    sb.treeOutput += (msg.meta && chalk.blueBright(`+${msg.meta.length}  `)) || '';
-    sb.treeOutput += (msg.content && color(`+${msg.content.length}  `)) || '';
-    sb.treeOutput += (msg.subLen && chalk.magenta(`+${msg.subLen}  `)) || '';
-    sb.treeOutput += chalk.gray(`= ${(msg.header?.length ?? 0) + (msg.meta?.length ?? 0) + (msg.content?.length ?? 0) + (msg.subLen ?? 0)}`)
+    sb.treeOutput += (msg.header && chalk.bgCyan.black(` +${msg.header.length} `)) || '';
+    sb.treeOutput += (msg.meta && chalk.bgBlue.black(` +${msg.meta.length} `)) || '';
+    sb.treeOutput += (valueBytes && bgColor(` +${valueBytes.length} `)) || '';
+    sb.treeOutput += chalk.gray(` index ${curIndex}`)
     sb.treeOutput += '\n';
   }
-
-  // Tree output
-  sb.treeOutput += (chalk.gray(indent) + chalk.bold.black.bgCyan(`${idLabel}`) + chalk.blue(` ${msg.dataType}(${msg.content?.length ?? msg.subLen ?? 0}) `) + color(msg.parsed || '') + '\n');
 }
 
 /** Full protobuf decode */
@@ -89,6 +92,7 @@ function protobuf(rawData: Uint8Array<ArrayBuffer>) {
   for (let i = 0; i < messages.length; i++) {
     console.log(chalk.blue(`\nMessage ${i + 1} (${messages[i].length} bytes):`));
     console.log(chalk.blueBright(str.parseString(messages[i])));
+    curIndex = 0;
     parseNode(messages[i]);
   }
 }
@@ -97,16 +101,15 @@ function parseNode(input: Uint8Array<ArrayBuffer>, depth = 0) {
   let branch = input.slice();
   let loops = 0;
   
-  while (branch.length > 0 && loops < 5) {
+  while (branch.length > 0 && loops < 25) {
     // Each node starts with header encoded as varint
     // Bottom 3 bits indicate type
     // The rest of the bits store the ID (tag number)
     const header = num.varInt(branch);
-    const body = branch.slice(header.chunk.length);
     const nodeId = header.value >>> 3;
     const nodeType = header.value & 0x07;
     const info: LogMsg = { depth, nodeId, header: header.chunk };
-    let subNode: Uint8Array<ArrayBuffer> | undefined;
+    let body = branch.slice(header.chunk.length);
 
     // Parse content based on type
     if (nodeType === 0) {
@@ -114,6 +117,7 @@ function parseNode(input: Uint8Array<ArrayBuffer>, depth = 0) {
       // 1-10 bytes (variable)
       info.dataType = 'varint';
       info.color = chalk.green;
+      info.bgColor = chalk.bgGreen.black;
 
       // Content immediately follows header
       const content = num.varInt(body);
@@ -125,6 +129,7 @@ function parseNode(input: Uint8Array<ArrayBuffer>, depth = 0) {
       // 8 bytes
       info.dataType = 'fixed64';
       info.color = chalk.greenBright;
+      info.bgColor = chalk.bgGreenBright.black;
 
       // Content is next 8 bytes
       const content = num.fixedInt(body, 8);
@@ -139,25 +144,25 @@ function parseNode(input: Uint8Array<ArrayBuffer>, depth = 0) {
       // First block indicates content length
       const meta = num.varInt(body);
       info.meta = meta.chunk;
-      const offset = meta.chunk.length;
+      body = body.slice(meta.chunk.length);
 
       // Content follows meta-block
-      const content = body.slice(offset, offset + meta.value);
+      const content = body.slice(0, meta.value);
+      info.content = content;
 
       if (bin.likelyString(content)) {
         // Scenario 1: String
         // Parse as ASCII character string
         info.dataType = 'string';
         info.color = chalk.yellow;
-        info.content = content;
+        info.bgColor = chalk.bgYellow.black;
         info.parsed = str.parseString(content);
       }
       else {
         // Scenario 2: Sub-node
-        // Store content to be parsed at the bottom of this function
+        // Content will be parsed at the end of the loop
         info.dataType = 'sub';
-        info.subLen = meta.value;
-        subNode = content;
+        info.bgColor = chalk.bgMagenta.black;
       }
     }
     else if (nodeType === 3) {
@@ -165,6 +170,7 @@ function parseNode(input: Uint8Array<ArrayBuffer>, depth = 0) {
       // Indicates the start of a subgroup
       info.dataType = 'groupStart';
       info.color = chalk.red;
+      info.bgColor = chalk.bgRed.black;
 
       // This type was never really used outside of a few early implementations
       // We'll note it in case it ever comes up
@@ -176,6 +182,7 @@ function parseNode(input: Uint8Array<ArrayBuffer>, depth = 0) {
       // Indicates the end of a subgroup
       info.dataType = 'groupEnd';
       info.color = chalk.red;
+      info.bgColor = chalk.bgRed.black;
 
       // This type was never really used outside of a few early implementations
       // We'll note it in case it ever comes up
@@ -187,6 +194,7 @@ function parseNode(input: Uint8Array<ArrayBuffer>, depth = 0) {
       // 4 bytes
       info.dataType = 'fixed32';
       info.color = chalk.greenBright;
+      info.bgColor = chalk.bgGreenBright.black;
 
       // Content is next 4 bytes
       const content = num.fixedInt(body, 4);
@@ -197,6 +205,7 @@ function parseNode(input: Uint8Array<ArrayBuffer>, depth = 0) {
       // Type not recognized!
       info.dataType = 'unknown';
       info.color = chalk.whiteBright.bgRed;
+      info.bgColor = chalk.bgRed.black;
       info.content = body.slice();
       info.parsed = `Invalid data type (${nodeType})`;
     }
@@ -205,12 +214,12 @@ function parseNode(input: Uint8Array<ArrayBuffer>, depth = 0) {
     logNode(info);
 
     // If we found a sub-node, keep parsing
-    if (subNode) {
-      parseNode(subNode, depth + 1);
+    if (info.dataType === 'sub') {
+      parseNode(new Uint8Array(info.content), depth + 1);
     }
 
     // Remove the bytes from this branch and leave the rest for the next loop
-    branch = body.slice((info.meta?.length ?? 0) + (info.content?.length ?? 0) + (info.subLen ?? 0));
+    branch = body.slice(info.content?.length ?? 0);
     loops++;
   }
 
